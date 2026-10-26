@@ -1,0 +1,8 @@
+node_modules/
+dist/
+dist-electron/
+dist-test/
+release/
+.env
+.env.*
+!.env.example
