@@ -20,11 +20,17 @@ import {
   snoozeTask,
   getSettings,
   saveSettings,
+  getDismissedOverdueSignatures,
+  saveDismissedOverdueSignatures,
 } from './database';
+import { OverdueController } from './overdueController';
 import { AppSettings, Task } from '../src/types';
 
 let widgetWindow: BrowserWindow | null = null;
 let managerWindow: BrowserWindow | null = null;
+let bannerWindow: BrowserWindow | null = null;
+let overdueController: OverdueController | null = null;
+let overdueCheckInterval: NodeJS.Timeout | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
 
@@ -48,6 +54,9 @@ function broadcastToAllWindows(channel: string, data?: any) {
   }
   if (managerWindow && !managerWindow.isDestroyed()) {
     managerWindow.webContents.send(channel, data);
+  }
+  if (bannerWindow && !bannerWindow.isDestroyed()) {
+    bannerWindow.webContents.send(channel, data);
   }
 }
 
@@ -304,6 +313,108 @@ function openManagerWindow(): void {
   });
 }
 
+function getBannerDimensions(taskCount: number) {
+  const primaryDisplay = screen.getPrimaryDisplay();
+  const { workArea } = primaryDisplay;
+  const bannerWidth = Math.min(860, Math.max(720, workArea.width - 32));
+  let bannerHeight = 140;
+  if (taskCount === 2) bannerHeight = 170;
+  else if (taskCount >= 3) bannerHeight = 205;
+
+  const x = workArea.x + Math.round((workArea.width - bannerWidth) / 2);
+  const y = workArea.y + 10;
+  return { width: bannerWidth, height: bannerHeight, x, y };
+}
+
+function createBannerWindow(): BrowserWindow {
+  if (bannerWindow && !bannerWindow.isDestroyed()) {
+    return bannerWindow;
+  }
+
+  const dims = getBannerDimensions(1);
+
+  bannerWindow = new BrowserWindow({
+    x: dims.x,
+    y: dims.y,
+    width: dims.width,
+    height: dims.height,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    hasShadow: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    resizable: false,
+    focusable: true,
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      devTools: process.env.NODE_ENV === 'development' || !app.isPackaged,
+    },
+  });
+
+  bannerWindow.setAlwaysOnTop(true, 'screen-saver');
+
+  const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+  if (isDev && process.env.VITE_DEV_SERVER_URL) {
+    bannerWindow.loadURL(`${process.env.VITE_DEV_SERVER_URL}/banner.html`);
+  } else {
+    bannerWindow.loadFile(path.join(app.getAppPath(), 'dist/banner.html'));
+  }
+
+  bannerWindow.on('close', (e) => {
+    if (!isQuitting) {
+      e.preventDefault();
+      bannerWindow?.hide();
+    }
+  });
+
+  return bannerWindow;
+}
+
+function setupOverdueManager(): void {
+  overdueController = new OverdueController({
+    getTasks: () => getAllTasks(),
+    getDismissedSignatures: () => getDismissedOverdueSignatures(),
+    saveDismissedSignatures: (signatures: string[]) => saveDismissedOverdueSignatures(signatures),
+    isBannerVisible: () => (bannerWindow ? bannerWindow.isVisible() : false),
+    onShowBanner: (overdueTasks: Task[]) => {
+      const win = createBannerWindow();
+      const dims = getBannerDimensions(overdueTasks.length);
+      win.setBounds({
+        x: dims.x,
+        y: dims.y,
+        width: dims.width,
+        height: dims.height,
+      });
+      win.setAlwaysOnTop(true, 'screen-saver');
+      if (!win.isVisible()) {
+        win.showInactive();
+      }
+      win.webContents.send('overdue-tasks-updated', overdueTasks);
+    },
+    onUpdateBanner: (overdueTasks: Task[]) => {
+      if (bannerWindow && !bannerWindow.isDestroyed()) {
+        const dims = getBannerDimensions(overdueTasks.length);
+        bannerWindow.setBounds({
+          x: dims.x,
+          y: dims.y,
+          width: dims.width,
+          height: dims.height,
+        });
+        bannerWindow.webContents.send('overdue-tasks-updated', overdueTasks);
+      }
+    },
+    onHideBanner: () => {
+      if (bannerWindow && !bannerWindow.isDestroyed() && bannerWindow.isVisible()) {
+        bannerWindow.hide();
+      }
+    },
+  });
+}
+
 function registerShortcuts(): void {
   try {
     // Alt+Space or Alt+Shift+H to toggle widget
@@ -340,33 +451,61 @@ function setupIpc(): void {
     return getAllTasks();
   });
 
+  ipcMain.handle('get-overdue-tasks', async () => {
+    return overdueController?.getOverdueTasks() || [];
+  });
+
+  ipcMain.handle('dismiss-overdue-banner', async () => {
+    overdueController?.dismiss();
+  });
+
   ipcMain.handle('create-task', async (_event, taskData: Omit<Task, 'id' | 'created_at' | 'updated_at'>) => {
+    if (!taskData || typeof taskData.title !== 'string') {
+      throw new Error('Invalid task title');
+    }
     const task = createTask(taskData);
     broadcastToAllWindows('tasks-changed');
+    overdueController?.evaluate();
     return task;
   });
 
   ipcMain.handle('update-task', async (_event, id: string, updates: Partial<Task>) => {
+    if (typeof id !== 'string' || !updates || typeof updates !== 'object') {
+      throw new Error('Invalid task update payload');
+    }
     const task = updateTask(id, updates);
     broadcastToAllWindows('tasks-changed');
+    overdueController?.evaluate();
     return task;
   });
 
   ipcMain.handle('toggle-task-complete', async (_event, id: string) => {
+    if (typeof id !== 'string') {
+      throw new Error('Invalid task id');
+    }
     const task = toggleTaskComplete(id);
     broadcastToAllWindows('tasks-changed');
+    overdueController?.evaluate();
     return task;
   });
 
   ipcMain.handle('delete-task', async (_event, id: string) => {
+    if (typeof id !== 'string') {
+      throw new Error('Invalid task id');
+    }
     const res = deleteTask(id);
     broadcastToAllWindows('tasks-changed');
+    overdueController?.evaluate();
     return res;
   });
 
   ipcMain.handle('snooze-task', async (_event, id: string, minutes: number) => {
+    if (typeof id !== 'string' || typeof minutes !== 'number' || minutes <= 0) {
+      throw new Error('Invalid snooze payload');
+    }
     const task = snoozeTask(id, minutes);
     broadcastToAllWindows('tasks-changed');
+    overdueController?.evaluate();
     return task;
   });
 
@@ -442,6 +581,8 @@ function setupIpc(): void {
       managerWindow?.hide();
     } else if (win === widgetWindow) {
       widgetWindow?.hide();
+    } else if (win === bannerWindow) {
+      overdueController?.dismiss();
     } else {
       win?.close();
     }
@@ -456,6 +597,32 @@ app.whenReady().then(async () => {
 
   const settings = getSettings();
   applyStartupSetting(settings.launch_at_startup);
+
+  // Initialize banner window and overdue manager
+  createBannerWindow();
+  setupOverdueManager();
+
+  // Handle display resolution changes safely
+  screen.on('display-metrics-changed', () => {
+    if (bannerWindow && !bannerWindow.isDestroyed()) {
+      const overdueCount = overdueController?.getOverdueTasks().length || 1;
+      const dims = getBannerDimensions(overdueCount);
+      bannerWindow.setBounds({
+        x: dims.x,
+        y: dims.y,
+        width: dims.width,
+        height: dims.height,
+      });
+    }
+  });
+
+  // Evaluate overdue tasks after database is ready
+  overdueController?.evaluate();
+
+  // Lightweight 30-second interval to catch time transitions without polling DB aggressively
+  overdueCheckInterval = setInterval(() => {
+    overdueController?.evaluate();
+  }, 30000);
 
   // Check if launched with --hidden argument
   const isHiddenLaunch = process.argv.includes('--hidden');
@@ -474,5 +641,9 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
+  if (overdueCheckInterval) {
+    clearInterval(overdueCheckInterval);
+    overdueCheckInterval = null;
+  }
   globalShortcut.unregisterAll();
 });

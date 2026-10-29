@@ -17,6 +17,7 @@ export default defineConfig({
       input: {
         index: path.resolve(__dirname, 'index.html'),
         widget: path.resolve(__dirname, 'widget.html'),
+        banner: path.resolve(__dirname, 'banner.html'),
       },
     },
   },

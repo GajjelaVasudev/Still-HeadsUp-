@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "strict": true
   },
-  "include": ["test/**/*", "src/utils/**/*", "src/types/**/*"]
+  "include": ["test/**/*", "src/utils/**/*", "src/types/**/*", "electron/overdueController.ts"]
 }

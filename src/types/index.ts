@@ -58,9 +58,13 @@ export interface ElectronAPI {
   minimizeWindow: () => Promise<void>;
   maximizeWindow: () => Promise<void>;
   closeWindow: () => Promise<void>;
+
+  getOverdueTasks: () => Promise<Task[]>;
+  dismissOverdueBanner: () => Promise<void>;
   
   onTasksChanged: (callback: () => void) => () => void;
   onSettingsChanged: (callback: (settings: AppSettings) => void) => () => void;
+  onOverdueTasksUpdated: (callback: (tasks: Task[]) => void) => () => void;
 }
 
 declare global {

@@ -438,6 +438,7 @@ export function getSettings(): AppSettings {
   if (res[0]) {
     for (const row of res[0].values) {
       const key = String(row[0]);
+      if (key === 'dismissed_overdue_signatures') continue;
       const val = String(row[1]);
       try {
         settings[key] = JSON.parse(val);
@@ -463,3 +464,31 @@ export function saveSettings(updates: Partial<AppSettings>): AppSettings {
   persistDatabase();
   return getSettings();
 }
+
+export function getDismissedOverdueSignatures(): string[] {
+  if (!db) return [];
+  try {
+    const res = db.exec(`SELECT value FROM settings WHERE key = 'dismissed_overdue_signatures'`);
+    if (res[0] && res[0].values[0]) {
+      const val = res[0].values[0][0];
+      return JSON.parse(String(val));
+    }
+  } catch (err) {
+    console.error('Failed to get dismissed overdue signatures:', err);
+  }
+  return [];
+}
+
+export function saveDismissedOverdueSignatures(signatures: string[]): void {
+  if (!db) return;
+  try {
+    db.run(
+      `INSERT INTO settings (key, value) VALUES ('dismissed_overdue_signatures', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      [JSON.stringify(signatures)]
+    );
+    persistDatabase();
+  } catch (err) {
+    console.error('Failed to save dismissed overdue signatures:', err);
+  }
+}
+

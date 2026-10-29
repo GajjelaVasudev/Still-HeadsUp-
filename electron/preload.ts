@@ -29,6 +29,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   maximizeWindow: (): Promise<void> => ipcRenderer.invoke('maximize-window'),
   closeWindow: (): Promise<void> => ipcRenderer.invoke('close-window'),
 
+  getOverdueTasks: (): Promise<Task[]> => ipcRenderer.invoke('get-overdue-tasks'),
+  dismissOverdueBanner: (): Promise<void> => ipcRenderer.invoke('dismiss-overdue-banner'),
+
   onTasksChanged: (callback: () => void) => {
     const handler = () => callback();
     ipcRenderer.on('tasks-changed', handler);
@@ -44,4 +47,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener('settings-changed', handler);
     };
   },
+
+  onOverdueTasksUpdated: (callback: (tasks: Task[]) => void) => {
+    const handler = (_event: any, tasks: Task[]) => callback(tasks);
+    ipcRenderer.on('overdue-tasks-updated', handler);
+    return () => {
+      ipcRenderer.removeListener('overdue-tasks-updated', handler);
+    };
+  },
 });
+
